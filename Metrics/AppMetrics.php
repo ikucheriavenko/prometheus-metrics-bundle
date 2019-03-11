@@ -1,5 +1,4 @@
 <?php
-
 declare(strict_types=1);
 
 namespace Artprima\PrometheusMetricsBundle\Metrics;
@@ -8,16 +7,19 @@ use Prometheus\CollectorRegistry;
 use Prometheus\Exception\MetricNotFoundException;
 use Symfony\Component\HttpKernel\Event\GetResponseEvent;
 use Symfony\Component\HttpKernel\Event\PostResponseEvent;
+use Symfony\Component\Stopwatch\Stopwatch;
 
 /**
  * Class AppMetrics.
  */
 class AppMetrics implements MetricsGeneratorInterface
 {
-    private const STOPWATCH_CLASS = '\Symfony\Component\Stopwatch\Stopwatch';
+    private const REQUEST_LABELS = ['method', 'path'];
+    private const RESPONSE_LABELS = ['method', 'path', 'code'];
+    private const ANY_VALUE_PATTERN = '*';
 
     /**
-     * @var \Symfony\Component\Stopwatch\Stopwatch
+     * @var Stopwatch
      */
     private $stopwatch;
 
@@ -31,17 +33,22 @@ class AppMetrics implements MetricsGeneratorInterface
      */
     private $collectionRegistry;
 
-    public function init(string $namespace, CollectorRegistry $collectionRegistry)
+    /**
+     * @param string            $namespace
+     * @param CollectorRegistry $collectionRegistry
+     */
+    public function init(string $namespace, CollectorRegistry $collectionRegistry): void
     {
-        if (class_exists(self::STOPWATCH_CLASS)) {
-            $className = self::STOPWATCH_CLASS;
-            $this->stopwatch = new $className();
-            $this->stopwatch->start('execution_time');
-        }
+        $this->stopwatch = new Stopwatch();
         $this->namespace = $namespace;
         $this->collectionRegistry = $collectionRegistry;
     }
 
+    /**
+     * @param string $value
+     *
+     * @throws \Prometheus\Exception\MetricsRegistrationException
+     */
     private function setInstance(string $value): void
     {
         $name = 'instance_name';
@@ -60,116 +67,107 @@ class AppMetrics implements MetricsGeneratorInterface
         }
     }
 
-    private function incRequestsTotal(?string $method = null, ?string $route = null): void
+    /**
+     * @param null|string $method
+     * @param null|string $path
+     */
+    private function incRequestsTotal(?string $method = null, ?string $path = null): void
     {
         $counter = $this->collectionRegistry->getOrRegisterCounter(
             $this->namespace,
             'http_requests_total',
             'total request count',
-            ['action']
+            static::REQUEST_LABELS
         );
 
-        $counter->inc(['all']);
+        $counter->inc(array_fill_keys(static::REQUEST_LABELS, static::ANY_VALUE_PATTERN));
 
-        if (null !== $method && null !== $route) {
-            $counter->inc([sprintf('%s-%s', $method, $route)]);
+        if (null !== $method && null !== $path) {
+            $counter->inc(compact(...static::REQUEST_LABELS));
         }
     }
 
-    private function inc2xxResponsesTotal(?string $method = null, ?string $route = null): void
+    /**
+     * @param null|string $method
+     * @param null|string $path
+     * @param null|int    $code
+     */
+    private function incResponsesTotal(?string $method = null, ?string $path = null, ?int $code = null): void
     {
         $counter = $this->collectionRegistry->getOrRegisterCounter(
             $this->namespace,
-            'http_2xx_responses_total',
-            'total 2xx response count',
-            ['action']
+            'http_responses_total',
+            'total response count',
+            static::RESPONSE_LABELS
         );
-        $counter->inc(['all']);
 
-        if (null !== $method && null !== $route) {
-            $counter->inc([sprintf('%s-%s', $method, $route)]);
+        $counter->inc(array_fill_keys(static::RESPONSE_LABELS, static::ANY_VALUE_PATTERN));
+
+        if (null !== $method && null !== $path && null !== $code) {
+            $counter->inc(compact(...static::RESPONSE_LABELS));
         }
     }
 
-    private function inc4xxResponsesTotal(?string $method = null, ?string $route = null): void
-    {
-        $counter = $this->collectionRegistry->getOrRegisterCounter(
-            $this->namespace,
-            'http_4xx_responses_total',
-            'total 4xx response count',
-            ['action']
-        );
-        $counter->inc(['all']);
-
-        if (null !== $method && null !== $route) {
-            $counter->inc([sprintf('%s-%s', $method, $route)]);
-        }
-    }
-
-    private function inc5xxResponsesTotal(?string $method = null, ?string $route = null): void
-    {
-        $counter = $this->collectionRegistry->getOrRegisterCounter(
-            $this->namespace,
-            'http_5xx_responses_total',
-            'total 5xx response count',
-            ['action']
-        );
-        $counter->inc(['all']);
-
-        if (null !== $method && null !== $route) {
-            $counter->inc([sprintf('%s-%s', $method, $route)]);
-        }
-    }
-
-    private function setRequestDuration(float $duration, ?string $method = null, ?string $route = null): void
+    /**
+     * @param float       $duration
+     * @param null|string $method
+     * @param null|string $path
+     */
+    private function setRequestDuration(float $duration, ?string $method = null, ?string $path = null): void
     {
         $histogram = $this->collectionRegistry->getOrRegisterHistogram(
             $this->namespace,
             'request_durations_histogram_seconds',
             'request durations in seconds',
-            ['action']
+            static::REQUEST_LABELS
         );
-        $histogram->observe($duration, ['all']);
 
-        if (null !== $method && null !== $route) {
-            $histogram->observe($duration, [sprintf('%s-%s', $method, $route)]);
+        $histogram->observe($duration, array_fill_keys(static::REQUEST_LABELS, static::ANY_VALUE_PATTERN));
+
+        if (null !== $method && null !== $path) {
+            $histogram->observe($duration, compact(...static::REQUEST_LABELS));
         }
     }
 
-    public function collectRequest(GetResponseEvent $event)
+    /**
+     * @param GetResponseEvent $event
+     *
+     * @throws \Prometheus\Exception\MetricsRegistrationException
+     */
+    public function collectRequest(GetResponseEvent $event): void
     {
+        $this->stopwatch->start('execution_time');
+
         $request = $event->getRequest();
         $requestMethod = $request->getMethod();
-        $requestRoute = $request->attributes->get('_route');
+        $requestPath = $request->getPathInfo();
 
         // do not track "OPTIONS" requests
         if ('OPTIONS' === $requestMethod) {
             return;
         }
 
-        $this->setInstance($request->server->get('HOSTNAME') ?? 'dev');
-        $this->incRequestsTotal($requestMethod, $requestRoute);
+        $this->setInstance(getenv('APP__ENV_NAME'));
+        $this->incRequestsTotal($requestMethod, $requestPath);
     }
 
-    public function collectResponse(PostResponseEvent $event)
+    /**
+     * @param PostResponseEvent $event
+     */
+    public function collectResponse(PostResponseEvent $event): void
     {
         $evt = $this->stopwatch ? $this->stopwatch->stop('execution_time') : null;
+
         $response = $event->getResponse();
         $request = $event->getRequest();
 
         $requestMethod = $request->getMethod();
-        $requestRoute = $request->attributes->get('_route');
+        $requestPath = $request->getPathInfo();
 
-        if ($response->getStatusCode() >= 200 && $response->getStatusCode() < 300) {
-            $this->inc2xxResponsesTotal($requestMethod, $requestRoute);
-        } elseif ($response->getStatusCode() >= 400 && $response->getStatusCode() < 500) {
-            $this->inc4xxResponsesTotal($requestMethod, $requestRoute);
-        } elseif ($response->getStatusCode() >= 500) {
-            $this->inc5xxResponsesTotal($requestMethod, $requestRoute);
-        }
+        $this->incResponsesTotal($requestMethod, $requestPath, $response->getStatusCode());
 
         if (null !== $evt) {
-            $this->setRequestDuration($evt->getDuration() / 1000, $requestMethod, $requestRoute);
+            $this->setRequestDuration($evt->getDuration() / 1000, $requestMethod, $requestPath);
         }
     }
 }
